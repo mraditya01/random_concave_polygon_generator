@@ -140,19 +140,12 @@ bool isValid(const Edge& e, const Polygon2d& P, const std::vector<Point2d>& Q) {
         Edge e2 = {Q[i], e.second};
 
         // Debug output
-        std::cout << "Checking edge from (" << e1.first.x() << ", " << e1.first.y() << ") to (" << e1.second.x() << ", " << e1.second.y() << ")" << std::endl;
-        std::cout << "  vs (" << e2.first.x() << ", " << e2.first.y() << ") to (" << e2.second.x() << ", " << e2.second.y() << ")" << std::endl;
-
         bool intersects_e1 = intersecting(e1, P);
         bool intersects_e2 = intersecting(e2, P);
 
-        std::cout << "  Intersection status: e1 = " << intersects_e1 << ", e2 = " << intersects_e2 << std::endl;
-
         if (!intersects_e1 && !intersects_e2) {
             valid = true;  // Edge is valid
-            std::cout << "  Edge is valid" << std::endl;
         } else {
-            std::cout << "  Edge is not valid" << std::endl;
         }
         
         ++i;
@@ -165,22 +158,15 @@ Point2d getNearestNode(const std::vector<Point2d>& Q, const Edge& e) {
     double min_distance = std::numeric_limits<double>::max();  // Use a large initial value
     Point2d nearest_node(0, 0);  // Initialize to a default value
 
-    std::cout << "Points in Q:" << std::endl;
-    for (const auto& point : Q) {
-        std::cout << "(" << point.x() << ", " << point.y() << ")" << std::endl;
-    }
 
     for (const auto& node : Q) {
         double distance = dist(e, node);  // Calculate the distance from the node to the edge
-        std::cout << "Distance from (" << node.x() << ", " << node.y() << ") to edge: " << distance << std::endl;
 
         if (distance < min_distance) {
             min_distance = distance;
             nearest_node = node;
         }
     }
-
-    std::cout << "Nearest node found: (" << nearest_node.x() << ", " << nearest_node.y() << ")" << std::endl;
     return nearest_node;
 }
 
@@ -245,8 +231,10 @@ Point2d getNearestNode(const std::vector<Point2d>& Q, const Edge& e) {
         for (size_t i = 0; i < ring.size(); ++i) {
             LinearRing2d new_ring = ring;
             new_ring.insert(new_ring.begin() + (i + 1), w);  // Insert the new node `w`
-            ring = std::move(new_ring);  // Update the polygon's ring with the new ring
-            updateEdges(P_with_edges);  // Update the edges in `P_with_edges`
+            if(isValidInsertion(new_ring)){
+                ring = std::move(new_ring);  // Update the polygon's ring with the new ring
+                updateEdges(P_with_edges); // Update the edges in `P_with_edges`
+                } 
             return;
         }
     }
@@ -267,17 +255,102 @@ Point2d getNearestNode(const std::vector<Point2d>& Q, const Edge& e) {
         }
     }
 
-    Polygon2d inwardDenting(Polygon2d& polygon)
+    enum Orientation {
+    COLLINEAR = 0,
+    CLOCKWISE = 1,
+    COUNTERCLOCKWISE = 2
+    };
+
+    Orientation orientation(const Point2d& p, const Point2d& q, const Point2d& r) {
+        double val = (q.y() - p.y()) * (r.x() - q.x()) - (q.x() - p.x()) * (r.y() - q.y());
+        if (val == 0) return COLLINEAR; 
+        return (val > 0) ? CLOCKWISE : COUNTERCLOCKWISE;  
+    }   
+
+
+    // needed as boost::convex_hull seems not working with defined Polygon2d
+    Polygon2d convexHull(const std::vector<Point2d>& points) {
+        Polygon2d convex_hull;
+
+        if (points.size() < 3) {
+            for (const auto& p : points) {
+                convex_hull.outer().emplace_back(p.x(), p.y());
+            }
+            return convex_hull;
+        }
+
+        std::vector<Point2d> sorted_points = points;
+        std::sort(sorted_points.begin(), sorted_points.end(), [](const Point2d& a, const Point2d& b) {
+            return a.x() < b.x();
+        });
+
+        std::vector<Point2d> lower;
+        for (const auto& p : sorted_points) {
+            while (lower.size() >= 2 && orientation(lower[lower.size() - 2], lower.back(), p) != COUNTERCLOCKWISE) {
+                lower.pop_back();
+            }
+            lower.push_back(p);
+        }
+
+        std::vector<Point2d> upper;
+        for (auto it = sorted_points.rbegin(); it != sorted_points.rend(); ++it) {
+            const auto& p = *it;
+            while (upper.size() >= 2 && orientation(upper[upper.size() - 2], upper.back(), p) != COUNTERCLOCKWISE) {
+                upper.pop_back();
+            }
+            upper.push_back(p);
+        }
+
+        lower.pop_back();
+        upper.pop_back();
+
+        convex_hull.outer().insert(convex_hull.outer().end(), lower.begin(), lower.end());
+        convex_hull.outer().insert(convex_hull.outer().end(), upper.begin(), upper.end());
+
+        return convex_hull;
+    }
+
+
+// Update polygon based on its edges
+    void updatePolygonFromEdges(PolygonWithEdges& P_with_edges) {
+        std::vector<Point2d> new_outer_ring;
+
+        for (const auto& edge : P_with_edges.edges) {
+            if (edge.valid) {
+                // Add the starting point of the edge to the polygon's outer ring
+                new_outer_ring.push_back(edge.first);
+            }
+        }
+
+        // Add the first point again to close the polygon if it's not already closed
+        if (!new_outer_ring.empty() && new_outer_ring.front() != new_outer_ring.back()) {
+            new_outer_ring.push_back(new_outer_ring.front());
+        }
+
+        // Update the polygon's outer ring with the new points
+        P_with_edges.polygon.outer().clear();
+        boost::geometry::append(P_with_edges.polygon, new_outer_ring);
+        boost::geometry::correct(P_with_edges.polygon);
+    }
+
+    Polygon2d inwardDenting(LinearRing2d& polygon)
     {
-        Polygon2d P = polygon;
+        LinearRing2d ring = polygon;
+        Polygon2d P;
 
         // Compute convex hull and initialize the point sets
-        const auto& outer_ring = P.outer();
+        const auto& outer_ring = ring;
         std::vector<Point2d> points(outer_ring.begin(), outer_ring.end());
         std::vector<Point2d> Q(points.begin(), points.end());
 
+        Polygon2d convex_hull = convexHull(points);
+
+        Q.erase(std::remove_if(Q.begin(), Q.end(), [&](const Point2d& p) {
+            return boost::geometry::within(p, convex_hull);
+        }), Q.end());
+
         PolygonWithEdges P_with_edges;
-        P_with_edges.polygon = P;
+        P_with_edges.polygon = convex_hull;
         P_with_edges.edges.resize(P_with_edges.polygon.outer().size());
 
         // Populate initial edges
@@ -290,8 +363,8 @@ Point2d getNearestNode(const std::vector<Point2d>& Q, const Edge& e) {
             Edge e = getBreakingEdge(P_with_edges, Q);
             Point2d w = getNearestNode(Q, e);
             insertNode(P_with_edges, w);
-            std::cout << "(" << w.x() << ", " << w.y() << ")" << std::endl;
             removeNode(Q, w);
+            updatePolygonFromEdges(P_with_edges);
             markValidEdges(P_with_edges, Q);
         }
         return P_with_edges.polygon;
@@ -370,6 +443,7 @@ Polygon2d random_non_convex_polygon(const size_t vertices, const double max)
     std::default_random_engine random_engine(r());
     std::uniform_real_distribution<double> uniform_dist(-max, max);
     std::uniform_int_distribution<int> random_bool(0, 1);
+    std::uniform_real_distribution<double> shift_uniform_dist(0, max/2);
 
     Polygon2d poly;
     bool is_non_convex = false;
@@ -379,6 +453,7 @@ Polygon2d random_non_convex_polygon(const size_t vertices, const double max)
     while (!is_non_convex && attempt < max_attempts) {
         auto xs = prepare_coordinate_vectors(vertices, uniform_dist, random_bool, random_engine);
         auto ys = prepare_coordinate_vectors(vertices, uniform_dist, random_bool, random_engine);
+
         std::shuffle(ys.vectors.begin(), ys.vectors.end(), random_engine);
 
         LinearRing2d vectors;
@@ -386,71 +461,32 @@ Polygon2d random_non_convex_polygon(const size_t vertices, const double max)
             vectors.emplace_back(xs.vectors[i], ys.vectors[i]);
         }
 
+
         std::sort(vectors.begin(), vectors.end(), [](const Point2d& p1, const Point2d& p2) {
             return std::atan2(p1.y(), p1.x()) < std::atan2(p2.y(), p2.x());
         });
-        auto min_x = max;
-        auto min_y = max;
-        auto x = 0.0;
-        auto y = 0.0;
         LinearRing2d points;
         for (const auto & p : vectors) {
-            points.emplace_back(x, y);
-            x += p.x();
-            y += p.y();
-            min_x = std::min(p.x(), min_x);
-            min_y = std::min(p.y(), min_y);
+            points.emplace_back(p.x(), p.y());
         }
-        const auto shift_x = min_x - xs.min;
-        const auto shift_y = min_y - ys.min;
-        for (auto & p : points) {
-            p.x() += shift_x;
-            p.y() += shift_y;
-        }
-
-        LinearRing2d poly_points;
-        for (const auto& p : points) {
-            poly_points.emplace_back(p.x(), p.y());
-        }
-
-        for (const auto& triangle : poly_points) {
-        std::cout << "before: " << triangle << std::endl;
-        }
-
-        poly.outer() = poly_points;
         // apply inward denting algorithm
-        poly = inwardDenting(poly);
+        poly = inwardDenting(points);
         // check for convexity
         if (!is_convex(poly)) {
             is_non_convex = true;
         }
-
-        // Ensure all points are positive after inward denting
-        double min_x_final = std::numeric_limits<double>::max();
-        double min_y_final = std::numeric_limits<double>::max();
-        for (const auto& p : poly.outer()) {
-            min_x_final = std::min(p.x(), min_x_final);
-            min_y_final = std::min(p.y(), min_y_final);
-        }
-
-        if (min_x_final < 0 || min_y_final < 0) {
-            double shift_x_final = std::max(0.0, -min_x_final);
-            double shift_y_final = std::max(0.0, -min_y_final);
-            for (auto& p : poly.outer()) {
-                p.x() += shift_x_final;
-                p.y() += shift_y_final;
-            }
-        }
-
-        for (const auto& triangle : poly.outer()) {
-        std::cout << "after: " << triangle << std::endl;
-        }
+        LinearRing2d poly_outer = poly.outer();
+        std::sort(poly_outer.begin(), poly_outer.end(), [](const Point2d& p1, const Point2d& p2) {
+            return std::atan2(p1.y(), p1.x()) < std::atan2(p2.y(), p2.x());
+        });
+        poly.outer() = poly_outer;
 
         boost::geometry::correct(poly);
 
 
         ++attempt;
     }
+    // std::cout << "(" << attempt << ")" << std::endl;
     return poly;
 }
 }  // namespace autoware::universe_utils
